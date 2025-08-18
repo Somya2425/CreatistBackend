@@ -843,6 +843,24 @@ class VisionBoardHandler:
 
             return Invitation(**row_dict)
 
+    async def cancel_invitation(self, invitation_id: uuid.UUID, requester_id: uuid.UUID) -> bool:
+        """Cancel an invitation by marking it as cancelled.
+
+        Only the sender or receiver of the invitation may cancel it.
+        Returns True when exactly one row was updated.
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE invitations
+                SET status = 'cancelled', responded_at = now()
+                WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2) AND status != 'cancelled'
+                """,
+                invitation_id,
+                requester_id
+            )
+            return result.startswith("UPDATE 1")
+
     async def send_group_message(self, visionboard_id: uuid.UUID, sender_id: uuid.UUID, message: str) -> 'GroupMessage':
         """Send a group chat message to a vision board group."""
         async with self.pool.acquire() as conn:

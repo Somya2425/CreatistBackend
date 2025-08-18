@@ -752,6 +752,24 @@ async def respond_to_invitation(
     )
     return {"message": f"Invitation {response.lower()}.", "invitation": inv.model_dump(mode="json")}
 
+@router.delete("/invitations/{invitation_id}")
+async def delete_invitation(
+    invitation_id: str,
+    token: Token = Depends(get_user_token)
+):
+    """Cancel an invitation (sender or receiver)."""
+    handler = get_visionboard_handler()
+    try:
+        inv_uuid = uuid.UUID(invitation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid invitation ID")
+
+    success = await handler.cancel_invitation(inv_uuid, requester_id=token.sub)
+    if not success:
+        # Either not found, not allowed, or already cancelled
+        raise HTTPException(status_code=404, detail="Invitation not found or not allowed")
+    return {"message": "Invitation cancelled"}
+
 @router.post("/{visionboard_id}/group-chat/message")
 async def send_group_message(
     visionboard_id: str,
