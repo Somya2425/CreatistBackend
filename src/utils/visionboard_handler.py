@@ -1009,6 +1009,67 @@ class VisionBoardHandler:
             )
             return result.startswith("DELETE 1") 
 
+    async def get_pending_invitation_for_assignment(self, genre_id: uuid.UUID, user_id: uuid.UUID) -> Optional[Invitation]:
+        """Get the pending invitation for a specific genre assignment (genre_id + user_id)"""
+        async with self.pool.acquire() as conn:
+            query = """
+                SELECT * FROM invitations 
+                WHERE object_type = 'genre' 
+                AND object_id = $1 
+                AND receiver_id = $2 
+                AND status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            row = await conn.fetchrow(query, genre_id, user_id)
+            if not row:
+                return None
+            
+            row_dict = dict(row)
+            if isinstance(row_dict.get('data'), str):
+                try:
+                    row_dict['data'] = json.loads(row_dict['data'])
+                except Exception:
+                    row_dict['data'] = None
+            return Invitation(**row_dict)
+
+    async def delete_genre_assignment(self, assignment_id: uuid.UUID, requester_id: uuid.UUID) -> bool:
+        """Delete a genre assignment and cancel the associated invitation if it exists"""
+        async with self.pool.acquire() as conn:
+            # First, get the assignment details to find the associated invitation
+            assignment_query = """
+                SELECT genre_id, user_id FROM genre_assignments 
+                WHERE id = $1
+            """
+            assignment_row = await conn.fetchrow(assignment_query, assignment_id)
+            if not assignment_row:
+                return False
+            
+            genre_id = assignment_row['genre_id']
+            user_id = assignment_row['user_id']
+            
+            # Delete the assignment
+            delete_result = await conn.execute(
+                "DELETE FROM genre_assignments WHERE id = $1",
+                assignment_id
+            )
+            
+            if not delete_result.startswith("DELETE 1"):
+                return False
+            
+            # Cancel the associated invitation if it exists
+            invitation_query = """
+                UPDATE invitations 
+                SET status = 'cancelled', responded_at = now()
+                WHERE object_type = 'genre' 
+                AND object_id = $1 
+                AND receiver_id = $2 
+                AND status = 'pending'
+            """
+            await conn.execute(invitation_query, genre_id, user_id)
+            
+            return True
+
     async def get_visionboard_collaborators(self, visionboard_id: uuid.UUID):
         """Get all collaborators (user_id, role) for a vision board. Role is the genre name."""
         async with self.pool.acquire() as conn:
@@ -1020,3 +1081,54 @@ class VisionBoardHandler:
             """
             rows = await conn.fetch(query, visionboard_id)
             return [(row['user_id'], row['role']) for row in rows] 
+
+    async def resend_invitation_for_assignment(self, assignment_id: uuid.UUID, requester_id: uuid.UUID) -> bool:
+        """Resend invitation notification for a specific assignment"""
+        async with self.pool.acquire() as conn:
+            # Get the assignment details
+            assignment_query = """
+                SELECT ga.genre_id, ga.user_id, ga.work_type, ga.payment_type, ga.payment_amount, ga.currency, ga.assigned_by,
+                       g.name as genre_name, vb.name as visionboard_name
+                FROM genre_assignments ga
+                JOIN genres g ON ga.genre_id = g.id
+                JOIN visionboards vb ON g.visionboard_id = vb.id
+                WHERE ga.id = $1
+            """
+            assignment_row = await conn.fetchrow(assignment_query, assignment_id)
+            if not assignment_row:
+                return False
+            
+            # Check if the requester is the vision board creator or the person who assigned
+            visionboard_creator_query = """
+                SELECT created_by FROM visionboards vb
+                JOIN genres g ON vb.id = g.visionboard_id
+                WHERE g.id = $1
+            """
+            creator_row = await conn.fetchrow(visionboard_creator_query, assignment_row['genre_id'])
+            if not creator_row:
+                return False
+            
+            # Only allow vision board creator or the person who assigned to resend
+            if requester_id not in [creator_row['created_by'], assignment_row['assigned_by']]:
+                return False
+            
+            # Create a new notification to resend the invitation
+            await self.create_notification(
+                receiver_id=assignment_row['user_id'],
+                sender_id=requester_id,
+                object_type="genre",
+                object_id=assignment_row['genre_id'],
+                event_type="invited",
+                data={
+                    "work_type": assignment_row['work_type'],
+                    "payment_type": assignment_row['payment_type'],
+                    "payment_amount": str(assignment_row['payment_amount']) if assignment_row['payment_amount'] else None,
+                    "currency": assignment_row['currency'],
+                    "genre_name": assignment_row['genre_name'],
+                    "visionboard_name": assignment_row['visionboard_name'],
+                    "is_reminder": True
+                },
+                message=f"Reminder: You have been invited to join '{assignment_row['visionboard_name']}' as {assignment_row['genre_name']}."
+            )
+            
+            return True 

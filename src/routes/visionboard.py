@@ -440,6 +440,90 @@ async def get_user_assignments(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/assignments/{assignment_id}/pending-invitation")
+async def get_pending_invitation_for_assignment(
+    request: Request, 
+    assignment_id: str, 
+    token: Token = Depends(get_user_token)
+):
+    """Get the pending invitation for a specific genre assignment"""
+    try:
+        # First get the assignment to get genre_id and user_id
+        handler = get_visionboard_handler()
+        
+        # We need to get the assignment details first
+        # For now, let's add a helper method to get assignment by ID
+        # This is a temporary solution - you might want to add a proper get_assignment method
+        async with handler.pool.acquire() as conn:
+            assignment_query = """
+                SELECT genre_id, user_id FROM genre_assignments 
+                WHERE id = $1
+            """
+            assignment_row = await conn.fetchrow(assignment_query, uuid.UUID(assignment_id))
+            if not assignment_row:
+                raise HTTPException(status_code=404, detail="Assignment not found")
+            
+            genre_id = assignment_row['genre_id']
+            user_id = assignment_row['user_id']
+        
+        invitation = await handler.get_pending_invitation_for_assignment(genre_id, user_id)
+        if not invitation:
+            raise HTTPException(status_code=404, detail="No pending invitation found for this assignment")
+        
+        return JSONResponse({
+            "message": "success",
+            "invitation": invitation.model_dump(mode="json")
+        })
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid assignment ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/assignments/{assignment_id}")
+async def delete_genre_assignment(
+    request: Request, 
+    assignment_id: str, 
+    token: Token = Depends(get_user_token)
+):
+    """Delete a genre assignment and cancel the associated invitation"""
+    try:
+        success = await get_visionboard_handler().delete_genre_assignment(
+            assignment_id=uuid.UUID(assignment_id),
+            requester_id=token.sub
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Assignment not found or not allowed to delete")
+        
+        return JSONResponse({"message": "Assignment deleted and invitation cancelled successfully"})
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid assignment ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/assignments/{assignment_id}/resend-invitation")
+async def resend_invitation_for_assignment(
+    request: Request, 
+    assignment_id: str, 
+    token: Token = Depends(get_user_token)
+):
+    """Resend invitation notification for a specific assignment (bell button functionality)"""
+    try:
+        success = await get_visionboard_handler().resend_invitation_for_assignment(
+            assignment_id=uuid.UUID(assignment_id),
+            requester_id=token.sub
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Assignment not found or not authorized to resend invitation")
+        
+        return JSONResponse({
+            "message": "Invitation resent successfully",
+            "status": "success"
+        })
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid assignment ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Task Operations
 @router.post("/tasks")
 async def create_task(
@@ -948,6 +1032,44 @@ async def get_visionboard_collaborators(visionboard_id: str, token: Token = Depe
         raise HTTPException(status_code=400, detail="Invalid vision board ID")
     collaborators = await handler.get_visionboard_collaborators(uuid_vb)
     return [{"user_id": str(user_id), "role": role} for user_id, role in collaborators]
+
+@router.get("/{visionboard_id}/genres/{genre_id}/users/{user_id}/pending-invitation")
+async def get_pending_invitation_for_user_in_genre(
+    request: Request, 
+    visionboard_id: str, 
+    genre_id: str, 
+    user_id: str, 
+    token: Token = Depends(get_user_token)
+):
+    """Get the pending invitation for a specific user in a specific genre of a vision board"""
+    try:
+        handler = get_visionboard_handler()
+        
+        # Verify the genre belongs to the vision board
+        async with handler.pool.acquire() as conn:
+            genre_check_query = """
+                SELECT 1 FROM genres 
+                WHERE id = $1 AND visionboard_id = $2
+            """
+            genre_exists = await conn.fetchrow(genre_check_query, uuid.UUID(genre_id), uuid.UUID(visionboard_id))
+            if not genre_exists:
+                raise HTTPException(status_code=404, detail="Genre not found in this vision board")
+        
+        invitation = await handler.get_pending_invitation_for_assignment(
+            genre_id=uuid.UUID(genre_id), 
+            user_id=uuid.UUID(user_id)
+        )
+        if not invitation:
+            raise HTTPException(status_code=404, detail="No pending invitation found for this user in this genre")
+        
+        return JSONResponse({
+            "message": "success",
+            "invitation": invitation.model_dump(mode="json")
+        })
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Include the router in the main app
 app.include_router(router) 
